@@ -1,0 +1,467 @@
+/*
+File: src/App.jsx
+Project: Trainual-like Knowledge Base (single-file demo)
+Theme: Nature green
+
+--- PSEUDOCODE / PLAN ---
+1. App shell
+   - Header with brand, search, user avatar
+   - Sidebar: Dashboard, Courses, Users, Create Course, Reports
+2. Data model (localStorage mock)
+   - users: [{id, name, email, role, assignedCourses, progress}]
+   - courses: [{id, title, description, modules, quizzes, createdBy}]
+   - modules: [{id, title, contentHtml, attachments}]
+   - quizzes: [{id, questions:[{q, options, answer}]}]
+3. Features
+   - Create/Edit course (title, desc, modules)
+   - Add module WYSIWYG (simple textarea -> sanitized HTML)
+   - Assign course to users (role-based access)
+   - Take course flow: view modules, mark complete
+   - Quiz runner with scoring and save to user.progress
+   - Search across courses & modules
+   - Reports: per-user progress, course completion
+4. UI
+   - Use Tailwind CSS utility classes (assume Tailwind loaded in host)
+   - Naturey green palette: #2F855A, #276749, #A7F3D0
+   - Clean card layout
+5. Persistence
+   - Use localStorage to simulate backend
+6. Extensibility notes (for later): real backend, SSO, file uploads, analytics
+
+Why: single-file demo helps iterate quickly; full backend and auth can be added later.
+*/
+
+import React, { useEffect, useState } from "react";
+
+// Minimal helper: generate id
+const id = (prefix = "id") => `${prefix}_${Math.random().toString(36).slice(2,9)}`;
+
+// Seed data if nothing in localStorage
+const seed = () => {
+  const adminId = id('user');
+  const userId = id('user');
+  return {
+    users: [
+      { id: adminId, name: "Charles Formica", email: "charles.formica7@gmail.com", role: "admin", assigned: [], progress: {} },
+      { id: userId, name: "New Employee", email: "new@company.com", role: "member", assigned: [], progress: {} }
+    ],
+    courses: [
+      {
+        id: id('course'),
+        title: "Welcome & Onboarding",
+        description: "Company overview, culture, and basic tools.",
+        createdBy: adminId,
+        modules: [
+          { id: id('m'), title: "About Company", content: "<p>Welcome to the company. Mission: delight customers.</p>" },
+          { id: id('m'), title: "Safety & Ops", content: "<p>Basic safety and operations procedures.</p>" }
+        ],
+        quizzes: [
+          { id: id('q'), questions: [
+            { id: id('qq'), q: "What is the mission?", options: ["Profit", "Delight customers", "Be famous"], answer: 1 }
+          ] }
+        ]
+      }
+    ]
+  };
+};
+
+function useDB() {
+  // localStorage-backed simple DB
+  const key = "trainual_demo_v1";
+  const read = () => {
+    const raw = localStorage.getItem(key);
+    if (!raw) {
+      const s = seed();
+      localStorage.setItem(key, JSON.stringify(s));
+      return s;
+    }
+    return JSON.parse(raw);
+  };
+  const [data, setData] = useState(read());
+  useEffect(() => { localStorage.setItem(key, JSON.stringify(data)); }, [data]);
+  return { data, setData };
+}
+
+// Small UI components
+const Icon = ({ name }) => {
+  if (name === 'search') return <svg className="w-5 h-5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35m0 0A7.5 7.5 0 1116.65 16.65z"/></svg>;
+  return null;
+};
+
+export default function App() {
+  const { data, setData } = useDB();
+  const [currentUserId, setCurrentUserId] = useState(data.users[0].id);
+  const currentUser = data.users.find(u => u.id === currentUserId);
+
+  const [view, setView] = useState('dashboard'); // dashboard, courses, editor, users, reports, take
+  const [selectedCourse, setSelectedCourse] = useState(null);
+  const [query, setQuery] = useState('');
+
+  // helpers to update DB immutably
+  const saveCourse = (course) => {
+    setData(prev => {
+      const courses = [...prev.courses];
+      const idx = courses.findIndex(c => c.id === course.id);
+      if (idx >= 0) courses[idx] = course; else courses.push(course);
+      return { ...prev, courses };
+    });
+  };
+
+  const createCourse = () => {
+    const c = { id: id('course'), title: "Untitled Course", description: "", createdBy: currentUser.id, modules: [], quizzes: [] };
+    saveCourse(c);
+    setSelectedCourse(c.id);
+    setView('editor');
+  };
+
+  const assignCourse = (courseId, userId) => {
+    setData(prev => {
+      const users = prev.users.map(u => u.id === userId ? { ...u, assigned: Array.from(new Set([...(u.assigned||[]), courseId])) } : u);
+      return { ...prev, users };
+    });
+  };
+
+  const markModuleComplete = (userId, courseId, moduleId) => {
+    setData(prev => {
+      const users = prev.users.map(u => {
+        if (u.id !== userId) return u;
+        const progress = { ...(u.progress || {}) };
+        const courseProg = new Set(progress[courseId] || []);
+        courseProg.add(moduleId);
+        progress[courseId] = Array.from(courseProg);
+        return { ...u, progress };
+      });
+      return { ...prev, users };
+    });
+  };
+
+  const completeQuiz = (userId, courseId, score) => {
+    setData(prev => {
+      const users = prev.users.map(u => {
+        if (u.id !== userId) return u;
+        const progress = { ...(u.progress || {}) };
+        progress[`${courseId}_quiz`] = (progress[`${courseId}_quiz`] || 0) < score ? score : progress[`${courseId}_quiz`];
+        return { ...u, progress };
+      });
+      return { ...prev, users };
+    });
+  };
+
+  const searchResults = () => {
+    const q = query.toLowerCase().trim();
+    if (!q) return [];
+    const res = [];
+    data.courses.forEach(course => {
+      if (course.title.toLowerCase().includes(q) || course.description.toLowerCase().includes(q)) res.push({type:'course', course});
+      course.modules.forEach(m => {
+        if (m.title.toLowerCase().includes(q) || (m.content||"").toLowerCase().includes(q)) res.push({type:'module', course, module: m});
+      });
+    });
+    return res;
+  };
+
+  // small components rendered inline
+  const Header = () => (
+    <header className="flex items-center justify-between bg-gradient-to-r from-green-600 to-green-700 text-white p-4">
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-full bg-green-900 flex items-center justify-center font-bold">CF</div>
+        <div>
+          <div className="font-bold">Formica Training</div>
+          <div className="text-xs opacity-90">Custom Trainual-like system</div>
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        <div className="relative">
+          <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search courses, modules..." className="pl-8 pr-3 py-2 rounded-md text-gray-800" />
+          <div className="absolute left-2 top-2 text-green-900"><Icon name="search"/></div>
+        </div>
+        <select value={currentUserId} onChange={e=>setCurrentUserId(e.target.value)} className="rounded-md p-2 text-green-900">
+          {data.users.map(u => <option key={u.id} value={u.id}>{u.name} ({u.role})</option>)}
+        </select>
+      </div>
+    </header>
+  );
+
+  const Sidebar = () => (
+    <aside className="w-64 bg-green-50 p-4">
+      <nav className="flex flex-col gap-2">
+        <button onClick={()=>setView('dashboard')} className={`text-left p-2 rounded ${view==='dashboard'?'bg-green-100':''}`}>Dashboard</button>
+        <button onClick={()=>setView('courses')} className={`text-left p-2 rounded ${view==='courses'?'bg-green-100':''}`}>Courses</button>
+        <button onClick={()=>setView('editor')} className={`text-left p-2 rounded ${view==='editor'?'bg-green-100':''}`}>Create Course</button>
+        <button onClick={()=>setView('users')} className={`text-left p-2 rounded ${view==='users'?'bg-green-100':''}`}>Users</button>
+        <button onClick={()=>setView('reports')} className={`text-left p-2 rounded ${view==='reports'?'bg-green-100':''}`}>Reports</button>
+      </nav>
+      <div className="mt-6">
+        <div className="text-xs text-green-700 font-semibold">Theme</div>
+        <div className="mt-2 flex gap-2">
+          <div className="w-6 h-6 bg-green-700 rounded" />
+          <div className="w-6 h-6 bg-green-500 rounded" />
+          <div className="w-6 h-6 bg-emerald-200 rounded" />
+        </div>
+      </div>
+    </aside>
+  );
+
+  const Dashboard = () => {
+    const totalCourses = data.courses.length;
+    const totalUsers = data.users.length;
+    const assigned = data.users.reduce((acc,u)=>acc + (u.assigned?.length||0),0);
+    return (
+      <div>
+        <h2 className="text-xl font-bold mb-4">Dashboard</h2>
+        <div className="grid grid-cols-3 gap-4">
+          <div className="p-4 bg-white rounded shadow"> <div className="text-sm text-green-600">Courses</div><div className="text-2xl font-bold">{totalCourses}</div></div>
+          <div className="p-4 bg-white rounded shadow"> <div className="text-sm text-green-600">Users</div><div className="text-2xl font-bold">{totalUsers}</div></div>
+          <div className="p-4 bg-white rounded shadow"> <div className="text-sm text-green-600">Assignments</div><div className="text-2xl font-bold">{assigned}</div></div>
+        </div>
+
+        <section className="mt-6">
+          <h3 className="font-semibold">Recent Courses</h3>
+          <div className="mt-2 grid gap-3">
+            {data.courses.map(c => (
+              <div key={c.id} className="p-3 bg-white rounded shadow flex justify-between items-center">
+                <div>
+                  <div className="font-semibold">{c.title}</div>
+                  <div className="text-xs text-gray-600">{c.description}</div>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={()=>{ setSelectedCourse(c.id); setView('take'); }} className="px-3 py-1 rounded bg-emerald-200 text-green-900">Open</button>
+                  <button onClick={()=>{ setSelectedCourse(c.id); setView('editor'); }} className="px-3 py-1 rounded bg-green-700 text-white">Edit</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    );
+  };
+
+  const CoursesList = () => (
+    <div>
+      <div className="flex justify-between items-center">
+        <h2 className="text-xl font-bold">Courses</h2>
+        <button onClick={createCourse} className="bg-green-700 text-white px-3 py-1 rounded">New Course</button>
+      </div>
+      <div className="mt-4 grid gap-3">
+        {data.courses.map(c => (
+          <div key={c.id} className="p-4 bg-white rounded shadow flex justify-between">
+            <div>
+              <div className="font-semibold">{c.title}</div>
+              <div className="text-sm text-gray-600">{c.description}</div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={()=>{ setSelectedCourse(c.id); setView('take'); }} className="px-3 py-1 rounded bg-emerald-200 text-green-900">Open</button>
+              <button onClick={()=>{ setSelectedCourse(c.id); setView('editor'); }} className="px-3 py-1 rounded bg-green-700 text-white">Edit</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  function Editor() {
+    const course = data.courses.find(c => c.id === selectedCourse) || { id: 'new', title: '', description: '', modules: [], quizzes: [] };
+    const [local, setLocal] = useState(course);
+    useEffect(()=> setLocal(course), [selectedCourse]);
+
+    const addModule = () => {
+      const m = { id: id('m'), title: 'New Module', content: '<p>Write content here...</p>' };
+      const next = { ...local, modules: [...(local.modules||[]), m] };
+      setLocal(next);
+      saveCourse(next);
+    };
+    const updateModule = (mid, patch) => {
+      const modules = (local.modules||[]).map(m => m.id===mid ? { ...m, ...patch } : m);
+      const next = { ...local, modules };
+      setLocal(next); saveCourse(next);
+    };
+    const removeModule = (mid) => { const next = { ...local, modules: (local.modules||[]).filter(m=>m.id!==mid) }; setLocal(next); saveCourse(next); };
+
+    return (
+      <div>
+        <div className="flex justify-between items-center">
+          <h2 className="text-xl font-bold">Editor</h2>
+          <div className="text-sm text-gray-600">Editing as {currentUser.name}</div>
+        </div>
+        <div className="mt-4 bg-white p-4 rounded shadow">
+          <input className="w-full p-2 border rounded" value={local.title} onChange={e=>{ setLocal({...local, title: e.target.value}); saveCourse({...local, title: e.target.value}); }} placeholder="Course title" />
+          <textarea className="w-full p-2 border rounded mt-2" value={local.description} onChange={e=>{ setLocal({...local, description: e.target.value}); saveCourse({...local, description: e.target.value}); }} placeholder="Short description" />
+
+          <div className="mt-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-semibold">Modules</h3>
+              <button onClick={addModule} className="px-2 py-1 bg-emerald-200 rounded text-green-900">Add Module</button>
+            </div>
+            <div className="mt-2 space-y-2">
+              {(local.modules||[]).map(m => (
+                <div key={m.id} className="p-2 bg-green-50 rounded">
+                  <input className="w-full p-1 border rounded" value={m.title} onChange={e=>updateModule(m.id, { title: e.target.value })} />
+                  <textarea className="w-full p-2 border rounded mt-2" value={m.content} onChange={e=>updateModule(m.id, { content: e.target.value })} rows={4} />
+                  <div className="mt-2 flex gap-2">
+                    <button onClick={()=>removeModule(m.id)} className="px-2 py-1 rounded bg-red-200">Delete</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function UsersView(){
+    return (
+      <div>
+        <h2 className="text-xl font-bold">Users</h2>
+        <div className="mt-4 grid gap-2">
+          {data.users.map(u => (
+            <div key={u.id} className="p-3 bg-white rounded shadow flex justify-between items-center">
+              <div>
+                <div className="font-semibold">{u.name}</div>
+                <div className="text-xs text-gray-600">{u.email} • {u.role}</div>
+              </div>
+              <div className="flex gap-2">
+                <select onChange={e=>assignCourse(e.target.value, u.id)} defaultValue="" className="p-2 border rounded">
+                  <option value="">Assign course...</option>
+                  {data.courses.map(c=> <option key={c.id} value={c.id}>{c.title}</option>)}
+                </select>
+                <button onClick={()=>{ setCurrentUserId(u.id); setView('take'); setSelectedCourse(u.assigned?.[0] || data.courses[0].id); }} className="px-2 py-1 rounded bg-emerald-200">View</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  function Reports(){
+    return (
+      <div>
+        <h2 className="text-xl font-bold">Reports</h2>
+        <div className="mt-4 grid gap-3">
+          {data.users.map(u => (
+            <div key={u.id} className="p-3 bg-white rounded shadow">
+              <div className="flex justify-between">
+                <div>
+                  <div className="font-semibold">{u.name}</div>
+                  <div className="text-xs text-gray-600">Assigned: {(u.assigned||[]).length}</div>
+                </div>
+                <div>
+                  <div className="text-sm">Progress:</div>
+                  <pre className="text-xs">{JSON.stringify(u.progress, null, 2)}</pre>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  function TakeCourse(){
+    const course = data.courses.find(c=>c.id===selectedCourse) || data.courses[0];
+    const user = currentUser;
+    if(!course) return <div>No course selected</div>;
+    const completed = new Set(Object.keys(user.progress || {}).includes(course.id) ? (user.progress[course.id]||[]) : (user.progress[course.id]||[]));
+    return (
+      <div>
+        <div className="flex justify-between items-start">
+          <div>
+            <h2 className="text-xl font-bold">{course.title}</h2>
+            <div className="text-sm text-gray-600">{course.description}</div>
+          </div>
+          <div className="text-xs text-gray-500">Assigned to: {user.name}</div>
+        </div>
+        <div className="mt-4 space-y-4">
+          {(course.modules||[]).map(m => (
+            <div key={m.id} className="p-3 bg-white rounded shadow">
+              <div className="flex justify-between">
+                <div>
+                  <div className="font-semibold">{m.title}</div>
+                  <div className="prose mt-2" dangerouslySetInnerHTML={{ __html: m.content }} />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <button onClick={()=>{ markModuleComplete(user.id, course.id, m.id); }} className="px-3 py-1 rounded bg-emerald-200">Mark complete</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        {course.quizzes && course.quizzes.map(q => <Quiz key={q.id} quiz={q} courseId={course.id} userId={user.id} onComplete={(score)=>completeQuiz(user.id, course.id, score)}/>) }
+      </div>
+    );
+  }
+
+  function Quiz({ quiz, courseId, userId, onComplete }){
+    const [answers, setAnswers] = useState({});
+    const submit = () => {
+      const total = quiz.questions.length;
+      let score = 0;
+      quiz.questions.forEach((qq, idx)=>{ if (answers[qq.id] == qq.answer) score++; });
+      const pct = Math.round((score/total)*100);
+      onComplete(pct);
+      alert(`You scored ${pct}%`);
+    };
+    return (
+      <div className="mt-4 p-4 bg-white rounded shadow">
+        <div className="font-semibold">Quiz</div>
+        {quiz.questions.map(q => (
+          <div key={q.id} className="mt-2">
+            <div className="font-medium">{q.q}</div>
+            <div className="mt-1 flex flex-col">
+              {q.options.map((opt, i) => (
+                <label key={i} className="inline-flex items-center gap-2 mt-1">
+                  <input type="radio" name={q.id} checked={answers[q.id]==i} onChange={()=>setAnswers(a=>({...a, [q.id]: i}))} />
+                  <span>{opt}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        ))}
+        <button onClick={submit} className="mt-3 px-3 py-1 rounded bg-green-700 text-white">Submit Quiz</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-emerald-50 text-gray-800">
+      <Header />
+      <div className="flex">
+        <Sidebar />
+        <main className="flex-1 p-6">
+          {query? (
+            <div>
+              <h3 className="font-semibold">Search results for "{query}"</h3>
+              <div className="mt-2 space-y-2">
+                {searchResults().map((r, i) => (
+                  <div key={i} className="p-3 bg-white rounded shadow">
+                    {r.type==='course' ? (
+                      <div>
+                        <div className="font-semibold">{r.course.title}</div>
+                        <div className="text-sm text-gray-600">{r.course.description}</div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="font-semibold">{r.module.title} <span className="text-xs text-gray-500">in {r.course.title}</span></div>
+                        <div className="text-sm text-gray-600" dangerouslySetInnerHTML={{__html: r.module.content.slice(0,200)}} />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div>
+              {view==='dashboard' && <Dashboard />}
+              {view==='courses' && <CoursesList />}
+              {view==='editor' && <Editor />}
+              {view==='users' && <UsersView />}
+              {view==='reports' && <Reports />}
+              {view==='take' && <TakeCourse />}
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}
